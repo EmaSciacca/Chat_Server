@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template for EC2 with Erlang and Rebar3, Auto Scaling Group, and ELB using existing VPC and Subnet
+
+Parameters:
+  VPCId:
+    Description: The ID of the existing VPC
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-12345678  # Replace with your existing VPC ID
+
+  SubnetId:
+    Description: The ID of the existing public subnet
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-12345678  # Replace with your existing Subnet ID
+
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+    ConstraintDescription: Must be a valid EC2 instance type within the free tier.
+
+Resources:
+  # Security Group
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP access
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Launch Configuration
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-066784287e358dad1
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          amazon-linux-extras install epel -y
+          yum install -y erlang
+          wget https://s3.amazonaws.com/rebar3/rebar3
+          chmod +x rebar3
+          mv rebar3 /usr/local/bin/
+          mkdir -p /home/ec2-user/erlang_server
+          cd /home/ec2-user/erlang_server
+          rebar3 new release myserver
+          cd myserver
+          rebar3 release
+          # Create a systemd service file for the Erlang server (for auto-restart)
+          cat <<EOF > /etc/systemd/system/erlang-server.service
+          [Unit]
+          Description=Erlang Server
+
+          [Service]
+          ExecStart=/home/ec2-user/erlang_server/myserver/_build/default/rel/myserver/bin/myserver start
+          Restart=always
+          User=ec2-user
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl enable erlang-server
+          systemctl start erlang-server
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: my-auto-scaling-instance
+          PropagateAtLaunch: true
+
+  # Auto Scaling Policy
+  AutoScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: SimpleScaling
+      ScalingAdjustment: 1
+      AdjustmentType: ChangeInCapacity
+
+  # Elastic Load Balancer
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      Listeners:
+        - InstancePort: '80'
+          InstanceProtocol: HTTP
+          LoadBalancerPort: '80'
+          Protocol: HTTP
+      HealthCheck:
+        Target: HTTP:80/
+        Interval: 30
+        Timeout: 5
+        UnhealthyThreshold: 2
+        HealthyThreshold: 2
+      SecurityGroups:
+        - !Ref SecurityGroup
+      Subnets:
+        - !Ref SubnetId  # Use the existing SubnetId
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: The DNS name of the load balancer
+    Value: !GetAtt ElasticLoadBalancer.DNSName
