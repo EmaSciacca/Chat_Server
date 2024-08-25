@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create an EC2 instance for hosting an Erlang rebar3 server.
+
+Parameters:
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC Id where the instance will be deployed
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: The Subnet Id where the instance will be deployed
+
+  EC2KeyPair:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+
+  AMIId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: The AMI ID to be used for the instance (Amazon Linux 2 AMI)
+
+Resources:
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties: 
+      InstanceType: t2.micro # Free Tier eligible instance type
+      KeyName: !Ref EC2KeyPair
+      ImageId: !Ref AMIId
+      SecurityGroupIds: 
+        - !Ref InstanceSecurityGroup
+      SubnetId: !Ref SubnetId
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          amazon-linux-extras install epel -y
+          yum install -y erlang
+          wget https://s3.amazonaws.com/rebar3/rebar3
+          chmod +x rebar3
+          mv rebar3 /usr/local/bin/
+          mkdir -p /home/ec2-user/erlang_server
+          cd /home/ec2-user/erlang_server
+          rebar3 new release myserver
+          cd myserver
+          rebar3 release
+          # Create a systemd service file for the Erlang server (for auto-restart)
+          cat <<EOF > /etc/systemd/system/erlang-server.service
+          [Unit]
+          Description=Erlang Server
+
+          [Service]
+          ExecStart=/home/ec2-user/erlang_server/myserver/_build/default/rel/myserver/bin/myserver start
+          Restart=always
+          User=ec2-user
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl enable erlang-server
+          systemctl start erlang-server
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: Enable SSH and TCP/IP ports for the Erlang server
+      VpcId: !Ref VPCId
+      SecurityGroupIngress: 
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0 # SSH access (adjust based on your security needs)
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0 # Erlang server port (adjust port as needed)
+
+Outputs:
+  InstanceId:
+    Description: Instance Id of the newly created EC2 instance
+    Value: !Ref EC2Instance
+  PublicIp:
+    Description: Public IP address of the newly created EC2 instance
+    Value: !GetAtt EC2Instance.PublicIp
